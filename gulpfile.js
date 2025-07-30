@@ -20,9 +20,9 @@ npm run gulp screenshots -hero -features
 const gulp = require('gulp');
 const fileinclude = require('gulp-file-include');
 //const sass = require('gulp-sass')(require('sass'));
-const sass = require('gulp-sass')(require('node-sass'));
+const sass = require('gulp-sass')(require('sass'));
 const sassGlob = require('gulp-sass-glob');
-const { formatHTML } = require('gulp-format-html');
+const formatHTML = require('gulp-format-html');
 //const gutil = require('gulp-util');
 const rename = require("gulp-rename");
 const imageResize = require('gulp-image-resize');
@@ -31,6 +31,8 @@ const connect = require('gulp-connect');
 const puppeteer = require('puppeteer');
 const fs = require('fs')
 const path = require('path');
+const sharp = require('sharp');
+const concat = require('gulp-concat');
 let baseHref = '';
 let blockPrefix = "landing";
 let themeName = "landing";
@@ -38,6 +40,62 @@ let themeName = "landing";
 //get command line parameters after some specified parameter
 function parameters() {
 	return process.argv.slice(3);
+}
+
+async function resizeWithSharp(inputPath, outputDir) {
+	const fileName = path.basename(inputPath, '.webp') + '-thumb.webp';
+	const outputPath = path.join(outputDir, fileName);
+
+	try {
+		const inputBuffer = await fs.promises.readFile(inputPath);
+		
+		const outputBuffer = await sharp(inputBuffer)
+			.resize({ width: 480 })
+			.webp({ quality: 80 })
+			.toBuffer();
+
+		await fs.promises.writeFile(outputPath, outputBuffer);
+
+		if (global.gc) {
+			global.gc();
+		}
+
+		await new Promise(resolve => setTimeout(resolve, 100));
+		
+		return outputPath;
+	} catch (error) {
+		console.error(`Error in resizeWithSharp: ${error.message}`);
+		throw error;
+	}
+}
+
+
+async function deleteTempFiles(files, retries = 2, delay = 300) {
+	for (const file of files) {
+		let attempt = 0;
+		while (attempt < retries) {
+			try {
+				await fs.promises.unlink(file);
+				console.log(`Đã xóa: ${file}`);
+				break;
+			} catch (err) {
+				if (err.code === 'EBUSY') {
+					attempt++;
+					console.warn(`EBUSY, thử lại ${attempt}: ${file}`);
+					await new Promise(resolve => setTimeout(resolve, delay));
+				} else if (err.code === 'ENOENT') {
+					console.warn(`Không tồn tại, bỏ qua: ${file}`);
+					break;
+				} else {
+					console.error(`Lỗi khi xóa ${file}: ${err.message}`);
+					break;
+				}
+			}
+		}
+		if (attempt === retries) {
+			console.error(`Không thể xóa file sau ${retries} lần thử: ${file}`);
+		}
+	}
 }
 
 const touch = () => through2.obj( function( file, enc, cb ) {
@@ -95,7 +153,7 @@ async function screenshots(type = "sections", dirs = []) {
 	let selector = "body > section";
 	let sections = [];
 	let baseDir = path.resolve(".");
-
+   
 	if (!dirs.length) {
 		dirs = fs.readdirSync(sectionsDir).map(fileName => {
 		  let filePath = `${sectionsDir}/${fileName}`;
@@ -119,117 +177,72 @@ async function screenshots(type = "sections", dirs = []) {
 		  '--start-maximized'
 		],
 		headless: true,
-		//slowMo: 250,
-		//devtools: true, 
 	});
 	const page = await browser.newPage();
-	//await page.setRequestInterception(true);
 	await page.setViewport({
 		width: 1500,
 		height: 800,
-		//deviceScaleFactor: 2
+
 	});
 
 	page.on('console', (msg) => console.log('PAGE LOG:', msg.text));
 
 	await page.evaluate(() => console.log(`url is ${location.href}`));
-	/*
-	page.on('request', (request) => {
-	if (request.resourceType() === 'image') request.abort();
-	else request.continue();
-	});
-	*/ 
-
 	let tempFiles = [];
 	
 	for (i in sections) {
 		section = sections[i];
 		screenshot = section.replace(sectionsDir, screenshotDir).replace('.html', '.webp');
 		tempFiles.push(screenshot);
-		sectionScreenshot = section.replace('.html', '-screenshot.html');;
+		sectionScreenshot = section.replace('.html', '-screenshot.html');
 		tempFiles.push(sectionScreenshot);
 		
-		//gutil.log(`Start screenshot for '${gutil.colors.cyan(section)}' to '${gutil.colors.magenta(screenshot)}'`);
 		console.log(`Start screenshot for '${section}' to '${screenshot}'`);
 		
 		folderName = path.dirname(screenshot);
 		if (!fs.existsSync(folderName)) {
-			fs.mkdirSync(folderName)
+			fs.mkdirSync(folderName, { recursive: true });
 		}			
 
 		let content = fs.readFileSync(section,'utf8');
 		let html = `<html data-vvvebjs-editor><head><base href="../../"><link href="/css/style.bundle.css" rel="stylesheet"><link href="/css/screenshots.css" rel="stylesheet"><style>[data-reveal], [data-section] > * {
-    opacity: 1;
-    transform: translate(0);
+	opacity: 1;
+	transform: translate(0);
 }</style></head><body>${content}</body></html>`;
 		fs.writeFileSync(sectionScreenshot, html);
 		
-		//await page.setContent(html, {"waitUntil":"networkidle0"});
 
 		url = "http://127.0.0.1:8008" + sectionScreenshot.replace(baseDir, '');
-		/*	
-		await Promise.all([ page.goto(url, { waitUntil: "load", timeout: 10000 }).catch(e => {
-		  if (e.message.includes('net::ERR_ABORTED')) { console.log('PAGE LOG:', e.message) }
-		}), page.waitForNavigation() ]);
-		*/ 
-		
+
 		await page.goto(url, { waitUntil: "load", timeout: 10000 }).catch(e => {
 		  console.log('PAGE LOG:', e.message);
-		  //if (e.message.includes('net::ERR_ABORTED')) { console.log('PAGE LOG:', e.message) }
 		});
-		//await page.goto("file://" + section);
-		/*
-		await page.addStyleTag({url: `file://${styleCss}`})
-		const result = await page.evaluate((baseHref) => {
-			let head = document.querySelector('head');
-			let base = document.createElement("base");
-			base.href= `file://${baseHref}/`;
-			head.append(base);
-		}, baseHref);
-		*/
-		//await page.waitForNavigation();
+		
 		
 		const element = await page.$$("body > div, body > section, body > header, body > footer, body > *");
-		//await page.screenshot({ path: screenshot, fullPage: false, type: 'png' });
-		//console.log(element[0]);
-		await element[0].screenshot({ path: screenshot, type: 'webp' });
-		
-		gulp.src(screenshot)
-		.pipe(imageResize({
-		  width : 480,
-		  format: "webp",
-		  quality:0,
-		}))
-		.pipe(rename(function (path) { path.basename += "-thumb"; }))
-		.pipe(gulp.dest(folderName)).on('end', () => {
-			//remove original screenshot and keep only thumb
-			 
-		});
-		
+		console.log(element[0]);
+
+		   if (element.length > 0) {
+			await element[0].screenshot({ path: screenshot, type: 'webp' });
+			await resizeWithSharp(screenshot, folderName);
+			await new Promise(resolve => setTimeout(resolve, 300)); 
+
+		} else {
+			console.warn(`Không tìm thấy phần tử để chụp trong ${url}`);
+		}
+	
 		
 	}
 
+	await page.close();
+
 	await browser.close();
 
-	tempFiles.map(screenshot => {
-		
-		fs.stat(screenshot, function (err, stats) {
-
-			   if (err) {
-				   return console.error(err);
-			   }
-
-			   fs.unlink(screenshot,function(err){
-					if(err) {
-						return console.log(err);
-					}
-					//console.log('file deleted successfully');
-			   });  
-			})
-	});
-	
+	await new Promise(resolve => setTimeout(resolve, 300));
+	if (global.gc) global.gc();
+	await deleteTempFiles(tempFiles);
 	return true;
-}
+	}
 
 let templates = {
 'section':{
@@ -342,6 +355,7 @@ gulp.task('connect', async function (done) {
     await connect.server({
         port: 8008,
 		root: './',
+		host: '127.0.0.1'
     });
 });
 
@@ -372,3 +386,5 @@ gulp.task('screenshots', gulp.series('connect', 'take-screenshots', 'disconnect'
 gulp.task('screenshots-blocks', gulp.series('connect', 'take-screenshots-blocks', 'disconnect'));
 gulp.task('sections', gulp.series('sections'));
 gulp.task('blocks', gulp.series('blocks'));
+
+
